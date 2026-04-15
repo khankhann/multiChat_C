@@ -1,22 +1,22 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <pthread.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 typedef int socklen_t;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <pthread.h>
 #endif
 
 #define MAX_CLIENTS 100
 #define PORT 8080
 
-// ===== CLIENT STRUCT =====
 typedef struct {
     int socket;
     char username[50];
@@ -26,76 +26,90 @@ typedef struct {
 client_t clients[MAX_CLIENTS];
 int client_count = 0;
 
-pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+#ifdef _WIN32
+CRITICAL_SECTION mutex;
+#else
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
-// ===== BROADCAST ROOM =====
-void broadcast_message(char *message, char *room, int sender_socket) {
-    pthread_mutex_lock(&clients_mutex);
+void lock() {
+#ifdef _WIN32
+    EnterCriticalSection(&mutex);
+#else
+    pthread_mutex_lock(&mutex);
+#endif
+}
+
+void unlock() {
+#ifdef _WIN32
+    LeaveCriticalSection(&mutex);
+#else
+    pthread_mutex_unlock(&mutex);
+#endif
+}
+
+void broadcast(char *msg, char *room, int sender) {
+    lock();
 
     for (int i = 0; i < client_count; i++) {
-        if (clients[i].socket != sender_socket &&
+        if (clients[i].socket != sender &&
             strcmp(clients[i].room, room) == 0) {
 
-            send(clients[i].socket, message, strlen(message), 0);
+            send(clients[i].socket, msg, strlen(msg), 0);
         }
     }
 
-    pthread_mutex_unlock(&clients_mutex);
+    unlock();
 }
 
-// ===== HANDLE CLIENT =====
-void *handle_client(void *socket_desc) {
-    int sock = *(int*)socket_desc;
-    free(socket_desc);
+#ifdef _WIN32
+DWORD WINAPI handle_client(void *arg)
+#else
+void *handle_client(void *arg)
+#endif
+{
+    int sock = *(int*)arg;
+    free(arg);
 
     char buffer[1024];
     char init[120];
 
-    // ===== nhận room|username =====
-    memset(init, 0, sizeof(init));
-    recv(sock, init, sizeof(init), 0);
+    int r = recv(sock, init, sizeof(init) - 1, 0);
+    if (r <= 0) return 0;
+    init[r] = '\0';
 
     char *room = strtok(init, "|");
     char *username = strtok(NULL, "|");
 
-    if (!room || !username) {
-        close(sock);
-        return NULL;
-    }
+    if (!room || !username) return 0;
 
-    username[strcspn(username, "\n")] = 0;
     room[strcspn(room, "\n")] = 0;
+    username[strcspn(username, "\n")] = 0;
 
-    // ===== lưu client =====
-    pthread_mutex_lock(&clients_mutex);
+    lock();
 
     clients[client_count].socket = sock;
     strcpy(clients[client_count].room, room);
     strcpy(clients[client_count].username, username);
     client_count++;
 
-    pthread_mutex_unlock(&clients_mutex);
+    unlock();
 
-    printf("[INFO] %s joined room %s\n", username, room);
+    printf("[JOIN] %s -> %s\n", username, room);
 
-    // ===== chat loop =====
     while (1) {
         memset(buffer, 0, sizeof(buffer));
-        int valread = recv(sock, buffer, sizeof(buffer), 0);
 
-        if (valread <= 0) {
-            printf("[INFO] %s left room %s\n", username, room);
-            break;
-        }
+        int r = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (r <= 0) break;
 
-        buffer[strcspn(buffer, "\n")] = 0;
+        buffer[r] = '\0';
 
-        char message[1200];
-        sprintf(message, "[%s]: %s", username, buffer);
+        char msg[1200];
+        sprintf(msg, "[%s]: %s", username, buffer);
 
-        printf("[ROOM %s] %s\n", room, message);
-
-        broadcast_message(message, room, sock);
+        printf("[%s] %s\n", room, msg);
+        broadcast(msg, room, sock);
     }
 
 #ifdef _WIN32
@@ -104,47 +118,43 @@ void *handle_client(void *socket_desc) {
     close(sock);
 #endif
 
-    return NULL;
+    return 0;
 }
 
-// ===== MAIN =====
 int main() {
 #ifdef _WIN32
     WSADATA wsa;
     WSAStartup(MAKEWORD(2,2), &wsa);
+    InitializeCriticalSection(&mutex);
+
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
 #endif
 
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(PORT);
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    bind(server_fd, (struct sockaddr*)&addr, sizeof(addr));
     listen(server_fd, 5);
 
-    printf("Server running on port %d...\n", PORT);
+    printf("Server running...\n");
 
-    while ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen))) {
+    while (1) {
+        int client = accept(server_fd, NULL, NULL);
 
-        pthread_t thread;
-        int *client_sock = malloc(sizeof(int));
-        *client_sock = new_socket;
-
-        pthread_create(&thread, NULL, handle_client, client_sock);
-        pthread_detach(thread);
-    }
+        int *p = malloc(sizeof(int));
+        *p = client;
 
 #ifdef _WIN32
-    closesocket(server_fd);
-    WSACleanup();
+        CreateThread(NULL, 0, handle_client, p, 0, NULL);
 #else
-    close(server_fd);
+        pthread_t t;
+        pthread_create(&t, NULL, handle_client, p);
+        pthread_detach(t);
 #endif
-
-    return 0;
+    }
 }
