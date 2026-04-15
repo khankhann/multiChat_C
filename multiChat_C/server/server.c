@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
+
 #ifdef _WIN32
 #include <winsock2.h>
 #pragma comment(lib, "ws2_32.lib")
@@ -15,64 +16,98 @@ typedef int socklen_t;
 #define MAX_CLIENTS 100
 #define PORT 8080
 
-// --- BIẾN TOÀN CỤC ---
-int client_sockets[MAX_CLIENTS];
-int client_count = 0;
-pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER; // Đã thêm biến Mutex
+// ===== CLIENT STRUCT =====
+typedef struct {
+    int socket;
+    char username[50];
+    char room[50];
+} client_t;
 
-// 1. HÀM BROADCAST (Đứng độc lập bên ngoài)
-void broadcast_message(char *message, int sender_socket) {
+client_t clients[MAX_CLIENTS];
+int client_count = 0;
+
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// ===== BROADCAST ROOM =====
+void broadcast_message(char *message, char *room, int sender_socket) {
     pthread_mutex_lock(&clients_mutex);
 
     for (int i = 0; i < client_count; i++) {
-        if (client_sockets[i] != sender_socket) {
-            send(client_sockets[i], message, strlen(message), 0);
+        if (clients[i].socket != sender_socket &&
+            strcmp(clients[i].room, room) == 0) {
+
+            send(clients[i].socket, message, strlen(message), 0);
         }
     }
 
     pthread_mutex_unlock(&clients_mutex);
 }
 
-// 2. HÀM XỬ LÝ CLIENT
+// ===== HANDLE CLIENT =====
 void *handle_client(void *socket_desc) {
     int sock = *(int*)socket_desc;
-    free(socket_desc); 
-    
-    // --- BƯỚC MỚI: Thêm client mới vào mảng ---
-    pthread_mutex_lock(&clients_mutex);
-    client_sockets[client_count++] = sock;
-    pthread_mutex_unlock(&clients_mutex);
+    free(socket_desc);
 
     char buffer[1024];
-    char message_to_send[1050]; // Bộ đệm mới để ghép tên người gửi
+    char init[120];
 
-    while(1) {
-        memset(buffer, 0, 1024);
-        int valread = recv(sock, buffer, 1024, 0);
-        
-        if (valread <= 0) {
-            printf("Mot nguoi dung da thoat (Socket %d).\n", sock);
-            break; 
-        }
-        
-        // In lên Server để theo dõi
-        printf("Client (Socket %d): %s", sock, buffer);
-        
-        // --- BƯỚC MỚI: Ghép chuỗi và gọi Broadcast ---
-        sprintf(message_to_send, "Client %d: %s", sock, buffer);
-        broadcast_message(message_to_send, sock); 
+    // ===== nhận room|username =====
+    memset(init, 0, sizeof(init));
+    recv(sock, init, sizeof(init), 0);
+
+    char *room = strtok(init, "|");
+    char *username = strtok(NULL, "|");
+
+    if (!room || !username) {
+        close(sock);
+        return NULL;
     }
-    
-    // Đóng kết nối khi thoát
+
+    username[strcspn(username, "\n")] = 0;
+    room[strcspn(room, "\n")] = 0;
+
+    // ===== lưu client =====
+    pthread_mutex_lock(&clients_mutex);
+
+    clients[client_count].socket = sock;
+    strcpy(clients[client_count].room, room);
+    strcpy(clients[client_count].username, username);
+    client_count++;
+
+    pthread_mutex_unlock(&clients_mutex);
+
+    printf("[INFO] %s joined room %s\n", username, room);
+
+    // ===== chat loop =====
+    while (1) {
+        memset(buffer, 0, sizeof(buffer));
+        int valread = recv(sock, buffer, sizeof(buffer), 0);
+
+        if (valread <= 0) {
+            printf("[INFO] %s left room %s\n", username, room);
+            break;
+        }
+
+        buffer[strcspn(buffer, "\n")] = 0;
+
+        char message[1200];
+        sprintf(message, "[%s]: %s", username, buffer);
+
+        printf("[ROOM %s] %s\n", room, message);
+
+        broadcast_message(message, room, sock);
+    }
+
 #ifdef _WIN32
     closesocket(sock);
 #else
     close(sock);
 #endif
+
     return NULL;
 }
 
-// 3. HÀM MAIN CHÍNH
+// ===== MAIN =====
 int main() {
 #ifdef _WIN32
     WSADATA wsa;
@@ -84,29 +119,24 @@ int main() {
     int addrlen = sizeof(address);
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    
+
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
     bind(server_fd, (struct sockaddr *)&address, sizeof(address));
-    listen(server_fd, 3);
+    listen(server_fd, 5);
 
-    printf("Server dang doi ket noi tai port %d...\n", PORT);
+    printf("Server running on port %d...\n", PORT);
 
-    while( (new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) ) {
-        printf("Co nguoi moi ket noi! (Socket %d)\n", new_socket);
-        
-        pthread_t sniffer_thread;
-        int *new_sock = malloc(sizeof(int)); 
-        *new_sock = new_socket;
+    while ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen))) {
 
-        if( pthread_create(&sniffer_thread, NULL, handle_client, (void*)new_sock) < 0) {
-            perror("Khong the tao luong");
-            return 1;
-        }
-        
-        pthread_detach(sniffer_thread); 
+        pthread_t thread;
+        int *client_sock = malloc(sizeof(int));
+        *client_sock = new_socket;
+
+        pthread_create(&thread, NULL, handle_client, client_sock);
+        pthread_detach(thread);
     }
 
 #ifdef _WIN32
@@ -115,5 +145,6 @@ int main() {
 #else
     close(server_fd);
 #endif
+
     return 0;
 }
