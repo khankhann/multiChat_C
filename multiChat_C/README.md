@@ -1,7 +1,13 @@
 # multiChat_C
 
-// run server 
+Step 1: Start server:
+
 gcc server.c -o server -lws2_32; .\server
 
-//run client 
-gcc client.c -o client -lws2_32; .\client
+Step 2: Run client:
+
+gcc client.c room.c -o client -lws2_32; .\client
+
+Usage
+
+Use /switch to leave the current room and choose a new chat room.
