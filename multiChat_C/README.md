@@ -2,7 +2,7 @@
 
 Step 1: Start server:
 
-gcc server.c -o server -lws2_32; .\server
+gcc server.c history.c -o server -lws2_32 ; ./serve
 
 Step 2: Run client:
 

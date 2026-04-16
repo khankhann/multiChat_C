@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "history.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -32,6 +33,7 @@ CRITICAL_SECTION mutex;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+// ================= LOCK =================
 void lock() {
 #ifdef _WIN32
     EnterCriticalSection(&mutex);
@@ -48,6 +50,7 @@ void unlock() {
 #endif
 }
 
+// ================= BROADCAST =================
 void broadcast(char *msg, char *room, int sender) {
     lock();
 
@@ -62,6 +65,7 @@ void broadcast(char *msg, char *room, int sender) {
     unlock();
 }
 
+// ================= HANDLE CLIENT =================
 #ifdef _WIN32
 DWORD WINAPI handle_client(void *arg)
 #else
@@ -74,6 +78,7 @@ void *handle_client(void *arg)
     char buffer[1024];
     char init[120];
 
+    // ===== nhận room + username =====
     int r = recv(sock, init, sizeof(init) - 1, 0);
     if (r <= 0) return 0;
     init[r] = '\0';
@@ -83,9 +88,10 @@ void *handle_client(void *arg)
 
     if (!room || !username) return 0;
 
-    room[strcspn(room, "\n")] = 0;
-    username[strcspn(username, "\n")] = 0;
+    room[strcspn(room, "\r\n")] = 0;
+    username[strcspn(username, "\r\n")] = 0;
 
+    // ===== add client =====
     lock();
 
     clients[client_count].socket = sock;
@@ -97,6 +103,12 @@ void *handle_client(void *arg)
 
     printf("[JOIN] %s -> %s\n", username, room);
 
+    // ===== HIỂN THỊ HƯỚNG DẪN =====
+    send(sock, "\nCommands:\n", strlen("\nCommands:\n"), 0);
+    send(sock, "/switch - change room\n", strlen("/switch - change room\n"), 0);
+    send(sock, "/history - view chat history\n\n", strlen("/history - view chat history\n\n"), 0);
+
+    // ===== nhận message =====
     while (1) {
         memset(buffer, 0, sizeof(buffer));
 
@@ -105,10 +117,21 @@ void *handle_client(void *arg)
 
         buffer[r] = '\0';
 
+        // ===== COMMAND /history =====
+        if (strcmp(buffer, "/history") == 0) {
+            send_last_history(sock, room, 50);
+            continue;
+        }
+
         char msg[1200];
         sprintf(msg, "[%s]: %s", username, buffer);
 
+        // ===== lưu history =====
+        save_message(room, msg);
+
         printf("[%s] %s\n", room, msg);
+
+        // ===== broadcast =====
         broadcast(msg, room, sock);
     }
 
@@ -121,6 +144,7 @@ void *handle_client(void *arg)
     return 0;
 }
 
+// ================= MAIN =================
 int main() {
 #ifdef _WIN32
     WSADATA wsa;
